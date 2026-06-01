@@ -4,14 +4,14 @@ Ngày cập nhật: 2026-06-01
 
 ## 1. Tổng quan dự án
 
-Dự án này là một Web API trung gian giữa MetaTrader 5 và ESP32.
+Dự án này là một Web API trung gian giữa MetaTrader 5 và ESP32. Backend hiện dùng FastAPI để có giao diện test API tự động tại `/docs`.
 
 Luồng hoạt động:
 
 ```text
 ESP32
   -> gọi HTTP qua Wi-Fi/LAN
-  -> Flask API chạy trên máy tính
+  -> FastAPI server chạy trên máy tính
   -> thư viện MetaTrader5 Python
   -> MT5 terminal đang đăng nhập tài khoản demo
   -> broker demo server
@@ -28,7 +28,7 @@ Mục tiêu hiện tại:
 
 | File | Vai trò |
 | --- | --- |
-| `server.py` | Flask server, định nghĩa HTTP endpoint. |
+| `server.py` | FastAPI server, định nghĩa HTTP endpoint và Swagger UI. |
 | `mt5_client.py` | Logic kết nối MT5, đọc dữ liệu, gửi/sửa/hủy lệnh. |
 | `config.py` | Đọc cấu hình từ `.env`. |
 | `.env.example` | Mẫu cấu hình local. |
@@ -45,6 +45,9 @@ Nội dung mẫu:
 MT5_LOGIN=
 MT5_PASSWORD=
 MT5_SERVER=ICMarkets-Demo
+MT5_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
+MT5_TIMEOUT_MS=120000
+MT5_LOGIN_ON_START=false
 
 API_KEY=test-api-key-123
 
@@ -63,6 +66,9 @@ Ghi chú:
 
 - Nếu MT5 terminal đã mở và đã login demo account, có thể để trống `MT5_LOGIN` và `MT5_PASSWORD`.
 - Nếu muốn Python login trực tiếp, điền `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER`.
+- `MT5_PATH` nên trỏ đúng tới file `terminal64.exe` để Python không mở nhầm terminal.
+- `MT5_TIMEOUT_MS=120000` cho MT5 tối đa 120 giây để khởi động và kết nối IPC.
+- Giữ `MT5_LOGIN_ON_START=false` nếu MT5 đã mở và đã đăng nhập. Chỉ đổi sang `true` nếu cần Python tự login lại.
 - `API_KEY` là khóa ESP32 phải gửi khi gọi endpoint giao dịch.
 - Không gửi file `.env` cho người khác.
 
@@ -118,7 +124,7 @@ Chạy server:
 .\.venv\Scripts\python.exe server.py
 ```
 
-Nếu chạy thành công, Flask sẽ lắng nghe ở:
+Nếu chạy thành công, FastAPI sẽ lắng nghe ở:
 
 ```text
 http://127.0.0.1:5000
@@ -126,6 +132,18 @@ http://<IP-LAN-của-máy-tính>:5000
 ```
 
 Không tắt cửa sổ PowerShell đang chạy server trong lúc test.
+
+Giao diện test API của FastAPI:
+
+```text
+http://127.0.0.1:5000/docs
+```
+
+OpenAPI schema:
+
+```text
+http://127.0.0.1:5000/openapi.json
+```
 
 ## 6. Cách test từng bước trước khi dùng ESP32
 
@@ -404,7 +422,7 @@ Invoke-RestMethod "http://192.168.1.20:5000/candles/XAUUSD?timeframe=M1&count=10
 
 Nếu không truy cập được:
 
-- Kiểm tra Flask có chạy với `FLASK_HOST=0.0.0.0`.
+- Kiểm tra API có chạy với `FLASK_HOST=0.0.0.0`.
 - Kiểm tra Windows Firewall có chặn port `5000`.
 - Kiểm tra máy tính và ESP32 cùng mạng Wi-Fi.
 - Không dùng `127.0.0.1` trên ESP32, vì `127.0.0.1` trên ESP32 là chính ESP32, không phải máy tính.

@@ -1,2 +1,3 @@
-Flask
+FastAPI
 MetaTrader5
+uvicorn

@@ -1,63 +1,144 @@
 # server.py
-from functools import wraps
+from typing import Optional
 
-from flask import Flask, jsonify, request
+import uvicorn
+from fastapi import Depends, FastAPI, Query, Security
+from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, Field
 
 import mt5_client
 from config import API_KEY, FLASK_DEBUG, FLASK_HOST, FLASK_PORT, MAX_CANDLES, SYMBOLS
 
 
-app = Flask(__name__)
+app = FastAPI(
+    title="MT5 ESP32 Web API",
+    version="1.0.0",
+    description="Local FastAPI bridge between ESP32 and MetaTrader 5 demo terminal.",
+)
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+mt5_connected = False
 
 
-def require_api_key(handler):
-    @wraps(handler)
-    def wrapper(*args, **kwargs):
-        if not API_KEY:
-            return error_response("API_KEY is not configured on the server", status=503)
-        if request.headers.get("X-API-Key") != API_KEY:
-            return error_response("Unauthorized", status=401)
-        return handler(*args, **kwargs)
-
-    return wrapper
+class MarketOrderRequest(BaseModel):
+    symbol: str = Field(..., examples=["XAUUSD"])
+    type: str = Field(..., examples=["BUY"], description="BUY or SELL")
+    volume: float = Field(..., gt=0, examples=[0.01])
+    sl: Optional[float] = Field(None, examples=[2320.0])
+    tp: Optional[float] = Field(None, examples=[2360.0])
+    comment: str = Field("esp32 market", examples=["esp32 market"])
 
 
-def json_body():
-    data = request.get_json(silent=True)
-    if data is None:
-        raise mt5_client.MT5Error("JSON body is required")
-    return data
+class PendingOrderRequest(BaseModel):
+    symbol: str = Field(..., examples=["XAUUSD"])
+    type: str = Field(..., examples=["BUY_LIMIT"], description="BUY_LIMIT, SELL_LIMIT, BUY_STOP, or SELL_STOP")
+    volume: float = Field(..., gt=0, examples=[0.01])
+    price: float = Field(..., gt=0, examples=[2330.0])
+    sl: Optional[float] = Field(None, examples=[2320.0])
+    tp: Optional[float] = Field(None, examples=[2350.0])
+    comment: str = Field("esp32 pending", examples=["esp32 pending"])
 
 
-def ok_response(data=None, message="ok", status=200):
-    return jsonify({"ok": True, "message": message, "data": data or {}}), status
+class ModifyOrderRequest(BaseModel):
+    ticket: int = Field(..., gt=0, examples=[123456789])
+    price: Optional[float] = Field(None, gt=0, examples=[2331.0])
+    sl: Optional[float] = Field(None, examples=[2321.0])
+    tp: Optional[float] = Field(None, examples=[2351.0])
+
+
+class TicketRequest(BaseModel):
+    ticket: int = Field(..., gt=0, examples=[123456789])
+
+
+class ModifyPositionRequest(BaseModel):
+    ticket: int = Field(..., gt=0, examples=[123456789])
+    sl: Optional[float] = Field(None, examples=[2325.0])
+    tp: Optional[float] = Field(None, examples=[2365.0])
+
+
+@app.on_event("startup")
+def startup():
+    global mt5_connected
+    mt5_connected = mt5_client.connect()
+    if not mt5_connected:
+        print("Failed to connect to MT5. API will start, but MT5 endpoints may fail.")
+
+
+@app.on_event("shutdown")
+def shutdown():
+    if mt5_connected:
+        mt5_client.disconnect()
+
+
+def require_api_key(api_key: Optional[str] = Security(api_key_header)):
+    if not API_KEY:
+        return error_response("API_KEY is not configured on the server", status=503)
+    if api_key != API_KEY:
+        return error_response("Unauthorized", status=401)
+    return True
+
+
+def ok_response(data=None, message="ok"):
+    return {"ok": True, "message": message, "data": data or {}}
 
 
 def error_response(message, details=None, status=400):
-    return jsonify({"ok": False, "error": message, "details": details or {}}), status
+    return JSONResponse(
+        status_code=status,
+        content={"ok": False, "error": message, "details": details or {}},
+    )
 
 
 def handle_mt5_error(error, status=400):
     return error_response(str(error), getattr(error, "details", {}), status=status)
 
 
-def parse_count(value):
-    try:
-        count = int(value)
-    except (TypeError, ValueError):
-        raise mt5_client.MT5Error("Invalid count", {"count": value})
-    if count < 1 or count > MAX_CANDLES:
-        raise mt5_client.MT5Error("Count is outside allowed range", {"min": 1, "max": MAX_CANDLES})
-    return count
+def endpoint_catalog():
+    return {
+        "status": "Server is running!",
+        "docs_url": "/docs",
+        "openapi_url": "/openapi.json",
+        "base_url_local": "http://127.0.0.1:5000",
+        "public_endpoints": [
+            {"method": "GET", "path": "/", "description": "Health check and endpoint list"},
+            {"method": "GET", "path": "/endpoints", "description": "Endpoint list"},
+            {"method": "GET", "path": "/tick/XAUUSD", "description": "Latest bid/ask tick"},
+            {
+                "method": "GET",
+                "path": "/candles/XAUUSD?timeframe=M1&count=10",
+                "description": "OHLCV candles",
+            },
+            {"method": "GET", "path": "/all", "description": "Latest ticks for configured symbols"},
+            {"method": "GET", "path": "/symbols", "description": "Configured symbol metadata"},
+        ],
+        "protected_endpoints": [
+            {"method": "GET", "path": "/account", "description": "Demo account info"},
+            {"method": "GET", "path": "/positions", "description": "Open positions"},
+            {"method": "GET", "path": "/orders", "description": "Pending orders"},
+            {"method": "POST", "path": "/order/market", "description": "Place market BUY/SELL order"},
+            {"method": "POST", "path": "/order/pending", "description": "Place pending order"},
+            {"method": "POST", "path": "/order/modify", "description": "Modify pending order"},
+            {"method": "POST", "path": "/order/cancel", "description": "Cancel pending order"},
+            {"method": "POST", "path": "/position/modify", "description": "Modify position SL/TP"},
+            {"method": "POST", "path": "/position/close", "description": "Close position"},
+        ],
+        "auth": {"required_for": "protected_endpoints", "header": "X-API-Key"},
+    }
 
 
-@app.route("/")
+@app.get("/", tags=["General"])
 def index():
-    return ok_response({"status": "Server is running!"})
+    return ok_response(endpoint_catalog())
 
 
-@app.route("/tick/<symbol>")
-def tick(symbol):
+@app.get("/endpoints", tags=["General"])
+def endpoints():
+    return ok_response(endpoint_catalog())
+
+
+@app.get("/tick/{symbol}", tags=["Market Data"])
+def tick(symbol: str):
     try:
         data = mt5_client.get_tick(symbol)
         if data:
@@ -67,11 +148,13 @@ def tick(symbol):
         return handle_mt5_error(error)
 
 
-@app.route("/candles/<symbol>")
-def candles(symbol):
+@app.get("/candles/{symbol}", tags=["Market Data"])
+def candles(
+    symbol: str,
+    timeframe: str = Query("M1", description="M1, M5, M15, M30, H1, H4, D1"),
+    count: int = Query(10, ge=1, le=MAX_CANDLES),
+):
     try:
-        timeframe = request.args.get("timeframe", "M1")
-        count = parse_count(request.args.get("count", 10))
         data = mt5_client.get_candles(symbol, timeframe=timeframe, count=count)
         if data is not None:
             return ok_response(
@@ -87,7 +170,7 @@ def candles(symbol):
         return handle_mt5_error(error)
 
 
-@app.route("/all")
+@app.get("/all", tags=["Market Data"])
 def all_ticks():
     result = {}
     for symbol in SYMBOLS:
@@ -100,13 +183,12 @@ def all_ticks():
     return ok_response(result)
 
 
-@app.route("/symbols")
+@app.get("/symbols", tags=["Market Data"])
 def symbols():
     return ok_response(mt5_client.get_symbols(SYMBOLS))
 
 
-@app.route("/account")
-@require_api_key
+@app.get("/account", tags=["Account"], dependencies=[Depends(require_api_key)])
 def account():
     try:
         return ok_response(mt5_client.get_account())
@@ -114,116 +196,100 @@ def account():
         return handle_mt5_error(error)
 
 
-@app.route("/positions")
-@require_api_key
-def positions():
+@app.get("/positions", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def positions(symbol: Optional[str] = Query(None)):
     try:
-        return ok_response(mt5_client.get_positions(request.args.get("symbol")))
+        return ok_response(mt5_client.get_positions(symbol))
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
-@app.route("/orders")
-@require_api_key
-def orders():
+@app.get("/orders", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def orders(symbol: Optional[str] = Query(None)):
     try:
-        return ok_response(mt5_client.get_orders(request.args.get("symbol")))
+        return ok_response(mt5_client.get_orders(symbol))
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
-@app.route("/order/market", methods=["POST"])
-@require_api_key
-def order_market():
+@app.post("/order/market", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def order_market(data: MarketOrderRequest):
     try:
-        data = json_body()
         result = mt5_client.place_market_order(
-            symbol=data.get("symbol"),
-            order_type=data.get("type"),
-            volume=data.get("volume"),
-            sl=data.get("sl"),
-            tp=data.get("tp"),
-            comment=data.get("comment", "esp32 market"),
+            symbol=data.symbol,
+            order_type=data.type,
+            volume=data.volume,
+            sl=data.sl,
+            tp=data.tp,
+            comment=data.comment,
         )
         return ok_response(result, message="market order sent")
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
-@app.route("/order/pending", methods=["POST"])
-@require_api_key
-def order_pending():
+@app.post("/order/pending", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def order_pending(data: PendingOrderRequest):
     try:
-        data = json_body()
         result = mt5_client.place_pending_order(
-            symbol=data.get("symbol"),
-            order_type=data.get("type"),
-            volume=data.get("volume"),
-            price=data.get("price"),
-            sl=data.get("sl"),
-            tp=data.get("tp"),
-            comment=data.get("comment", "esp32 pending"),
+            symbol=data.symbol,
+            order_type=data.type,
+            volume=data.volume,
+            price=data.price,
+            sl=data.sl,
+            tp=data.tp,
+            comment=data.comment,
         )
         return ok_response(result, message="pending order placed")
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
-@app.route("/order/modify", methods=["POST"])
-@require_api_key
-def order_modify():
+@app.post("/order/modify", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def order_modify(data: ModifyOrderRequest):
     try:
-        data = json_body()
         result = mt5_client.modify_pending_order(
-            ticket=data.get("ticket"),
-            price=data.get("price"),
-            sl=data.get("sl"),
-            tp=data.get("tp"),
+            ticket=data.ticket,
+            price=data.price,
+            sl=data.sl,
+            tp=data.tp,
         )
         return ok_response(result, message="pending order modified")
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
-@app.route("/order/cancel", methods=["POST"])
-@require_api_key
-def order_cancel():
+@app.post("/order/cancel", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def order_cancel(data: TicketRequest):
     try:
-        data = json_body()
-        result = mt5_client.cancel_order(data.get("ticket"))
+        result = mt5_client.cancel_order(data.ticket)
         return ok_response(result, message="pending order canceled")
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
-@app.route("/position/modify", methods=["POST"])
-@require_api_key
-def position_modify():
+@app.post("/position/modify", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def position_modify(data: ModifyPositionRequest):
     try:
-        data = json_body()
-        result = mt5_client.modify_position(
-            ticket=data.get("ticket"),
-            sl=data.get("sl"),
-            tp=data.get("tp"),
-        )
+        result = mt5_client.modify_position(ticket=data.ticket, sl=data.sl, tp=data.tp)
         return ok_response(result, message="position modified")
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
-@app.route("/position/close", methods=["POST"])
-@require_api_key
-def position_close():
+@app.post("/position/close", tags=["Trading"], dependencies=[Depends(require_api_key)])
+def position_close(data: TicketRequest):
     try:
-        data = json_body()
-        result = mt5_client.close_position(data.get("ticket"))
+        result = mt5_client.close_position(data.ticket)
         return ok_response(result, message="position closed")
     except mt5_client.MT5Error as error:
         return handle_mt5_error(error)
 
 
 if __name__ == "__main__":
-    if mt5_client.connect():
-        app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG)
-    else:
-        print("Failed to connect to MT5. Exiting.")
+    uvicorn.run(
+        "server:app",
+        host=FLASK_HOST,
+        port=FLASK_PORT,
+        reload=FLASK_DEBUG,
+    )
