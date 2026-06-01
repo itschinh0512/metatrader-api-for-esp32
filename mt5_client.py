@@ -8,8 +8,11 @@ from config import (
     DEFAULT_LOT,
     DEFAULT_MAGIC,
     MT5_LOGIN,
+    MT5_LOGIN_ON_START,
     MT5_PASSWORD,
+    MT5_PATH,
     MT5_SERVER,
+    MT5_TIMEOUT_MS,
 )
 
 
@@ -49,16 +52,30 @@ class MT5Error(Exception):
 
 
 def connect():
-    if not mt5.initialize():
+    print("Initializing MT5 terminal...")
+    if MT5_PATH:
+        initialized = mt5.initialize(MT5_PATH, timeout=MT5_TIMEOUT_MS)
+    else:
+        initialized = mt5.initialize(timeout=MT5_TIMEOUT_MS)
+
+    if not initialized:
         print("MT5 initialize() failed, error:", mt5.last_error())
         return False
 
-    if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+    if MT5_LOGIN_ON_START and MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+        print(f"Logging in to MT5 account {MT5_LOGIN} on {MT5_SERVER}...")
         if not mt5.login(MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
             print("MT5 login() failed, error:", mt5.last_error())
+            mt5.shutdown()
             return False
+    elif MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+        print("Skipping mt5.login(); using the account already open in MT5 terminal.")
 
-    print("Connected to MT5 successfully!")
+    account = mt5.account_info()
+    if account:
+        print(f"Connected to MT5 successfully: login={account.login}, server={account.server}")
+    else:
+        print("Connected to MT5 successfully, but account_info() is unavailable.")
     return True
 
 

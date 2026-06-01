@@ -40,15 +40,25 @@ def _get_list(name, default):
     return [item.strip().upper() for item in value.split(",") if item.strip()]
 
 
+def _get_bool(name, default=False):
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 _load_dotenv()
 
 MT5_LOGIN = _get_int("MT5_LOGIN", 0)
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER = os.getenv("MT5_SERVER", "")
+MT5_PATH = os.getenv("MT5_PATH", "")
+MT5_TIMEOUT_MS = _get_int("MT5_TIMEOUT_MS", 120000)
+MT5_LOGIN_ON_START = _get_bool("MT5_LOGIN_ON_START", False)
 
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = _get_int("FLASK_PORT", 5000)
-FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+FLASK_DEBUG = _get_bool("FLASK_DEBUG", False)
 
 API_KEY = os.getenv("API_KEY", "")
 SYMBOLS = _get_list("SYMBOLS", ["EURUSD", "GBPUSD", "XAUUSD"])
